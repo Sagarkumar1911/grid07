@@ -1,0 +1,21 @@
+# ── Core AI / LLM ────────────────────────────────────────────────────────
+langchain>=0.2.0
+langchain-groq>=0.1.6          # Groq-hosted Llama-3 (free tier)
+langchain-core>=0.2.0
+langgraph>=0.1.0
+
+# ── Embeddings & Vector Store ─────────────────────────────────────────────
+sentence-transformers>=2.7.0
+faiss-cpu>=1.8.0            # or faiss-gpu if you have CUDA
+
+# ── LLM Alternatives (comment out what you don't use) ─────────────────────
+# groq>=0.9.0               # for Groq-hosted Llama-3
+# ollama>=0.2.0             # for local Ollama Llama-3
+
+# ── Utilities ─────────────────────────────────────────────────────────────
+python-dotenv>=1.0.0
+numpy>=1.26.0
+pydantic>=2.7.0
+
+# ── Optional: progress bars & nicer logs ──────────────────────────────────
+tqdm>=4.66.0
