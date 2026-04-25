@@ -5,9 +5,12 @@ Uses sentence-transformers for local embeddings + FAISS for vector similarity.
 Routes incoming posts to only the bots whose personas are relevant.
 """
 
+import logging
 import numpy as np
 from sentence_transformers import SentenceTransformer
 import faiss
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # 1. Bot Persona Definitions
@@ -59,10 +62,10 @@ def build_persona_index(model: SentenceTransformer) -> tuple[faiss.IndexFlatIP, 
     embeddings = np.array(embeddings, dtype="float32")
 
     dim = embeddings.shape[1]
-    index = faiss.IndexFlatIP(dim)   # Inner Product index
+    index = faiss.IndexFlatIP(dim)  # Inner Product index
     index.add(embeddings)
 
-    print(f"[Phase 1] Persona index built — {index.ntotal} vectors, dim={dim}")
+    logger.info("Persona index built — %d vectors, dim=%d", index.ntotal, dim)
     return index, bot_ids
 
 
@@ -75,11 +78,16 @@ def route_post_to_bots(
     model: SentenceTransformer,
     index: faiss.IndexFlatIP,
     bot_ids: list[str],
-    threshold: float = 0.30,   # lower threshold for demo; tune per embedding model
+    threshold: float = 0.85,
 ) -> list[dict]:
     """
     Embed *post_content* and return every bot whose persona cosine-similarity
     score exceeds *threshold*.
+
+    NOTE: all-MiniLM-L6-v2 scores typically fall in the 0.25–0.55 range for
+    semantically related text. If using this model, set threshold=0.30.
+    The 0.85 default matches the assignment spec and works with larger models
+    (e.g. text-embedding-3-small). Tune per embedding model as instructed.
 
     Parameters
     ----------
@@ -113,40 +121,3 @@ def route_post_to_bots(
     # Sort by score descending for readability
     matched.sort(key=lambda x: x["score"], reverse=True)
     return matched
-
-
-# ---------------------------------------------------------------------------
-# 4. Demo / smoke-test
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    print("=" * 60)
-    print("  Phase 1 — Vector Persona Router")
-    print("=" * 60)
-
-    # Load model once; re-used across all calls
-    print("\n[Phase 1] Loading embedding model …")
-    model = SentenceTransformer("all-MiniLM-L6-v2")   # fast, good quality, free
-
-    index, bot_ids = build_persona_index(model)
-
-    test_posts = [
-        "OpenAI just released a new model that might replace junior developers.",
-        "Bitcoin hits new all-time high amid regulatory ETF approvals.",
-        "Big Tech companies are harvesting your data and selling it to advertisers.",
-        "The Fed just raised interest rates by 25 bps — bond yields are spiking.",
-    ]
-
-    THRESHOLD = 0.30   # cosine sim threshold
-
-    for post in test_posts:
-        print(f"\n📨 Post: \"{post}\"")
-        results = route_post_to_bots(post, model, index, bot_ids, threshold=THRESHOLD)
-
-        if results:
-            print(f"   Matched bots (threshold={THRESHOLD}):")
-            for r in results:
-                bar = "█" * int(r["score"] * 30)
-                print(f"   • {r['bot_id']} ({r['name']})  score={r['score']}  {bar}")
-        else:
-            print("   No bots matched above threshold.")

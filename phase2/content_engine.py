@@ -10,19 +10,30 @@ Output schema: {"bot_id": "...", "topic": "...", "post_content": "..."}
 """
 
 import json
-import os
-from typing import Annotated, TypedDict
+import logging
+from typing import TypedDict
 
 from dotenv import load_dotenv
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import tool
 from langchain_groq import ChatGroq
 from langgraph.graph import END, StateGraph
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
-# Bot personas (reused from Phase 1 for consistency)
+# LLM — initialised once at module level; reused across all nodes.
+# Swap the model name here to change it everywhere simultaneously.
+# ---------------------------------------------------------------------------
+
+llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0.85).bind(
+    response_format={"type": "json_object"}
+)
+
+# ---------------------------------------------------------------------------
+# Bot personas
 # ---------------------------------------------------------------------------
 
 BOT_PERSONAS = {
@@ -48,27 +59,27 @@ BOT_PERSONAS = {
 # ---------------------------------------------------------------------------
 
 MOCK_NEWS: dict[str, list[str]] = {
-    "crypto":    ["Bitcoin hits new all-time high amid regulatory ETF approvals",
-                  "Ethereum Layer-2 adoption surges 300% YoY"],
-    "ai":        ["OpenAI releases GPT-5 with 10x reasoning improvements",
-                  "EU AI Act enforcement begins — fines up to €30M"],
-    "market":    ["S&P 500 posts worst week since 2022 on recession fears",
-                  "Fed signals two more rate hikes in 2025"],
-    "privacy":   ["Meta fined $1.2B for illegal EU data transfers",
-                  "New browser fingerprinting technique bypasses all blockers"],
-    "space":     ["SpaceX Starship completes first successful Mars trajectory test",
-                  "NASA Artemis III crew announced — Moon landing set for 2026"],
-    "climate":   ["Arctic sea ice hits record low for third consecutive year",
-                  "Renewable energy overtakes fossil fuels in EU grid mix"],
-    "default":   ["Tech stocks rally on better-than-expected earnings",
-                  "Global startup funding rebounds after two-year slump"],
+    "crypto":  ["Bitcoin hits new all-time high amid regulatory ETF approvals",
+                "Ethereum Layer-2 adoption surges 300% YoY"],
+    "ai":      ["OpenAI releases GPT-5 with 10x reasoning improvements",
+                "EU AI Act enforcement begins — fines up to €30M"],
+    "market":  ["S&P 500 posts worst week since 2022 on recession fears",
+                "Fed signals two more rate hikes in 2025"],
+    "privacy": ["Meta fined $1.2B for illegal EU data transfers",
+                "New browser fingerprinting technique bypasses all blockers"],
+    "space":   ["SpaceX Starship completes first successful Mars trajectory test",
+                "NASA Artemis III crew announced — Moon landing set for 2026"],
+    "climate": ["Arctic sea ice hits record low for third consecutive year",
+                "Renewable energy overtakes fossil fuels in EU grid mix"],
+    "default": ["Tech stocks rally on better-than-expected earnings",
+                "Global startup funding rebounds after two-year slump"],
 }
 
 
 @tool
 def mock_searxng_search(query: str) -> str:
     """
-    Simulates a SearXNG web search.  Returns recent mock headlines
+    Simulates a SearXNG web search. Returns recent mock headlines
     based on keywords found in *query*.
 
     Parameters
@@ -103,7 +114,7 @@ class PostState(TypedDict):
     search_query: str
     search_results: str
     post_content: str
-    final_output: dict   # the strict JSON deliverable
+    final_output: dict  # the strict JSON deliverable
 
 
 # ---------------------------------------------------------------------------
@@ -117,25 +128,19 @@ def node_decide_search(state: PostState) -> PostState:
       (a) what topic to post about today
       (b) what search query to fire
     """
-    llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0.9)
-
     system = (
         f"{state['persona']}\n\n"
         "You are deciding what to post on social media today. "
         "Pick ONE topic that strongly aligns with your worldview. "
-        "Respond with ONLY a JSON object — no markdown fences:\n"
+        "Respond with ONLY a JSON object:\n"
         '{"topic": "<short topic label>", "search_query": "<4-8 word web search>"}'
     )
 
     response = llm.invoke([SystemMessage(content=system),
                            HumanMessage(content="What do you want to post about today?")])
 
-    raw = response.content.strip()
-    # Strip accidental markdown fences
-    raw = raw.replace("```json", "").replace("```", "").strip()
-    parsed = json.loads(raw)
-
-    print(f"[Node 1] Decided → topic='{parsed['topic']}' | query='{parsed['search_query']}'")
+    parsed = json.loads(response.content)
+    logger.info("Node 1 — topic='%s' | query='%s'", parsed["topic"], parsed["search_query"])
 
     return {**state, "topic": parsed["topic"], "search_query": parsed["search_query"]}
 
@@ -143,24 +148,23 @@ def node_decide_search(state: PostState) -> PostState:
 def node_web_search(state: PostState) -> PostState:
     """
     Node 2 — Web Search
-    Executes mock_searxng_search with the query from Node 1.
+    Executes mock_searxng_search with the query produced by Node 1.
     """
     results = mock_searxng_search.invoke({"query": state["search_query"]})
-    print(f"[Node 2] Search results:\n{results}")
+    logger.info("Node 2 — search results:\n%s", results)
     return {**state, "search_results": results}
 
 
 def node_draft_post(state: PostState) -> PostState:
     """
     Node 3 — Draft Post
-    Generates a ≤280-char opinionated post; enforces strict JSON output.
+    Generates a ≤280-char opinionated post using persona + search context.
+    Enforces strict JSON output via Groq's json_object response format.
     """
-    llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0.85)
-
     system = (
         f"{state['persona']}\n\n"
         "You write punchy, opinionated social-media posts (≤280 characters). "
-        "You MUST respond with ONLY a JSON object — no markdown, no preamble:\n"
+        "You MUST respond with ONLY a JSON object:\n"
         '{"bot_id": "<bot_id>", "topic": "<topic>", "post_content": "<post ≤280 chars>"}\n\n'
         f"Your bot_id is: {state['bot_id']}\n"
         f"Today's topic: {state['topic']}\n"
@@ -170,21 +174,23 @@ def node_draft_post(state: PostState) -> PostState:
     response = llm.invoke([SystemMessage(content=system),
                            HumanMessage(content="Draft your post now.")])
 
-    raw = response.content.strip().replace("```json", "").replace("```", "").strip()
-    parsed = json.loads(raw)
+    parsed = json.loads(response.content)
+    parsed["post_content"] = parsed["post_content"][:280]  # hard cap at 280 chars
 
-    # Trim post_content to 280 chars just in case
-    parsed["post_content"] = parsed["post_content"][:280]
-
-    print(f"[Node 3] Drafted post:\n  {json.dumps(parsed, indent=2)}")
+    logger.info("Node 3 — drafted post:\n%s", json.dumps(parsed, indent=2))
     return {**state, "post_content": parsed["post_content"], "final_output": parsed}
 
 
 # ---------------------------------------------------------------------------
-# 4. Assemble the LangGraph
+# 4. Graph factory
 # ---------------------------------------------------------------------------
 
 def build_content_graph() -> StateGraph:
+    """
+    Assembles and compiles the three-node LangGraph state machine.
+
+    Flow: decide_search → web_search → draft_post → END
+    """
     graph = StateGraph(PostState)
 
     graph.add_node("decide_search", node_decide_search)
@@ -197,35 +203,3 @@ def build_content_graph() -> StateGraph:
     graph.add_edge("draft_post",    END)
 
     return graph.compile()
-
-
-# ---------------------------------------------------------------------------
-# 5. Demo
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    print("=" * 60)
-    print("  Phase 2 — Autonomous Content Engine (LangGraph)")
-    print("=" * 60)
-
-    app = build_content_graph()
-
-    for bot_id, persona in BOT_PERSONAS.items():
-        print(f"\n{'─'*50}")
-        print(f"Running graph for {bot_id} …")
-        print(f"{'─'*50}")
-
-        initial_state: PostState = {
-            "bot_id":        bot_id,
-            "persona":       persona,
-            "topic":         "",
-            "search_query":  "",
-            "search_results": "",
-            "post_content":  "",
-            "final_output":  {},
-        }
-
-        result = app.invoke(initial_state)
-
-        print(f"\n✅ Final JSON output for {bot_id}:")
-        print(json.dumps(result["final_output"], indent=2))
